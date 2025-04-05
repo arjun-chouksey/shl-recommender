@@ -9,6 +9,7 @@ google-generativeai==0.3.1
 # Web
 fastapi==0.105.0
 streamlit==1.27.0
+uvicorn==0.24.0
 
 # Utils
 pandas==2.1.1
