@@ -1,24 +1,25 @@
 # Scraping
-httpx==0.25.0
-selectolax==0.3.14
-playwright==1.39.0
+httpx==0.23.0
+selectolax==0.3.12
+# Removing playwright to avoid binary installation issues
+# playwright==1.39.0
 
 # AI
-google-generativeai==0.3.1
+google-generativeai==0.2.1
 
 # Web
-fastapi==0.105.0
-streamlit==1.27.0
-uvicorn==0.24.0
-pillow==10.0.0
+fastapi==0.95.0
+streamlit==1.22.0
+uvicorn==0.22.0
+pillow==9.5.0
 
 # Utils
-pandas==2.1.1
-pydantic==2.5.2
-tqdm==4.66.1
+pandas==1.5.3
+pydantic==1.10.8
+tqdm==4.65.0
 python-dotenv==1.0.0
-numpy==1.26.0
-scikit-learn==1.4.0
+numpy==1.24.3
+scikit-learn==1.2.2
 
 # Replacing faiss-cpu with scikit-learn for vector similarity
 # faiss-cpu==1.7.4 

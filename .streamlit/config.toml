@@ -1,6 +1,8 @@
 [server]
 enableCORS = true
 enableXsrfProtection = false
+headless = true
+maxUploadSize = 5
 
 [browser]
 gatherUsageStats = false
@@ -9,4 +11,9 @@ gatherUsageStats = false
 primaryColor = "#0066b2"
 backgroundColor = "#ffffff"
 secondaryBackgroundColor = "#f8f9fa"
-textColor = "#262730" 
+textColor = "#262730"
+
+[runner]
+# Set the entry point
+# This will ensure streamlit_app.py runs first to set up sample data
+fastReruns = true 

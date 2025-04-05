@@ -24,13 +24,24 @@ except ImportError:
     logger.warning("Could not import recommender module, will use API only")
 
 # Constants
-# Try to get the API URL from Streamlit secrets first, then environment variables
+# Safely get API URL from various sources with fallbacks
+API_URL = None
 try:
+    # Try getting from secrets
     API_URL = st.secrets["API_URL"]
-except (KeyError, FileNotFoundError):
-    API_URL = os.environ.get("API_URL", "http://localhost:8000")
+    logger.info("Using API URL from Streamlit secrets")
+except Exception as e:
+    logger.warning(f"Could not load from secrets: {str(e)}")
+    # Try getting from environment
+    API_URL = os.environ.get("API_URL")
+    if API_URL:
+        logger.info("Using API URL from environment variables")
+    else:
+        # Use default as last resort
+        API_URL = "https://shl-recommender-api-wypm.onrender.com"
+        logger.info("Using default API URL")
 
-logger.info(f"Using API URL: {API_URL}")
+logger.info(f"API URL: {API_URL}")
 
 # Set page configuration
 st.set_page_config(
@@ -221,19 +232,29 @@ def show_recommendations():
     
     # API vs. Direct mode indicator
     st.sidebar.markdown("## System Status")
-    if DIRECT_MODE:
+
+    # Check API availability first
+    api_available = False
+    api_status = st.sidebar.empty()
+
+    try:
+        response = requests.get(f"{API_URL}/model-info", timeout=3)
+        if response.status_code == 200:
+            model_info = response.json()
+            api_status.success(f"Connected to API ({model_info.get('assessments_count', '?')} assessments)")
+            api_available = True
+        else:
+            api_status.error(f"API available but returned error ({response.status_code})")
+            api_available = False
+    except Exception as e:
+        logger.error(f"Cannot connect to API: {str(e)}")
+        api_status.error("Cannot connect to API - Using local mode")
+        api_available = False
+
+    # Use direct mode if API is not available and direct mode is possible
+    use_direct = (not api_available) or DIRECT_MODE
+    if use_direct and DIRECT_MODE:
         st.sidebar.success("Running in direct mode (recommender loaded)")
-    else:
-        api_status = st.sidebar.empty()
-        try:
-            response = requests.get(f"{API_URL}/model-info", timeout=2)
-            if response.status_code == 200:
-                model_info = response.json()
-                api_status.success(f"Connected to API ({model_info.get('assessments_count', '?')} assessments)")
-            else:
-                api_status.error(f"API available but returned error ({response.status_code})")
-        except:
-            api_status.error("Cannot connect to API")
     
     # Input form
     with st.container():
@@ -248,7 +269,7 @@ def show_recommendations():
             
             if submit_button and query:
                 with st.spinner("Generating recommendations..."):
-                    if DIRECT_MODE:
+                    if use_direct and DIRECT_MODE:
                         results = get_recommendations_direct(query, max_duration, top_k)
                     else:
                         results = get_recommendations_from_api(query, max_duration, top_k)
@@ -274,7 +295,7 @@ def show_recommendations():
                         st.text(query[:500] + "..." if len(query) > 500 else query)
                     
                     with st.spinner("Generating recommendations..."):
-                        if DIRECT_MODE:
+                        if use_direct and DIRECT_MODE:
                             results = get_recommendations_direct(query, max_duration, top_k)
                         else:
                             results = get_recommendations_from_api(query, max_duration, top_k)

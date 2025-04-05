@@ -29,9 +29,9 @@ ENV/
 .env
 
 # Data files
-shl_assessments.json
+# shl_assessments.json  # Commented out to include in repository
 shl_assessments.csv
-sample_assessments.json
+# sample_assessments.json  # Commented out to include in repository
 evaluation_results.csv
 
 # Database
