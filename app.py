@@ -24,7 +24,13 @@ except ImportError:
     logger.warning("Could not import recommender module, will use API only")
 
 # Constants
-API_URL = os.environ.get("API_URL", "http://localhost:8000")
+# Try to get the API URL from Streamlit secrets first, then environment variables
+try:
+    API_URL = st.secrets["API_URL"]
+except (KeyError, FileNotFoundError):
+    API_URL = os.environ.get("API_URL", "http://localhost:8000")
+
+logger.info(f"Using API URL: {API_URL}")
 
 # Set page configuration
 st.set_page_config(
