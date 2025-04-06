@@ -145,16 +145,13 @@ def extract_text_from_url(url: str) -> str:
         st.error(f"Error extracting text from URL: {str(e)}")
         return ""
 
-def get_recommendations_from_api(query: str, max_duration: Optional[int] = None, top_k: int = 10) -> Dict[str, Any]:
+def get_recommendations_from_api(query: str, top_k: int = 10) -> Dict[str, Any]:
     """Get recommendations from the API"""
     try:
         params = {
             "query": query,
             "top_k": top_k
         }
-        
-        if max_duration and max_duration > 0:
-            params["max_duration"] = max_duration
         
         response = requests.get(f"{API_URL}/recommend", params=params)
         response.raise_for_status()
@@ -165,27 +162,18 @@ def get_recommendations_from_api(query: str, max_duration: Optional[int] = None,
         st.error(f"Error getting recommendations from API: {str(e)}")
         return {"recommendations": [], "query": query}
 
-def get_recommendations_direct(query: str, max_duration: Optional[int] = None, top_k: int = 10) -> Dict[str, Any]:
+def get_recommendations_direct(query: str, top_k: int = 10) -> Dict[str, Any]:
     """Get recommendations directly using the recommender (no API)"""
     try:
         recommender = get_recommender()
-        # Only send max_duration if positive value
-        if max_duration and max_duration > 0:
-            recommendations = recommender.recommend(
-                query=query,
-                max_duration=max_duration,
-                top_k=top_k
-            )
-        else:
-            recommendations = recommender.recommend(
-                query=query,
-                top_k=top_k
-            )
+        recommendations = recommender.recommend(
+            query=query,
+            top_k=top_k
+        )
         
         return {
             "recommendations": recommendations,
-            "query": query,
-            "max_duration": max_duration
+            "query": query
         }
     except Exception as e:
         logger.error(f"Error getting recommendations directly: {str(e)}")
@@ -212,21 +200,11 @@ def show_recommendations():
     
     # Sidebar for advanced options
     st.sidebar.markdown("## Search Options")
-    max_duration = st.sidebar.slider(
-        "Max Duration (minutes)",
-        min_value=0,
-        max_value=120,
-        value=60,
-        step=5,
-        help="Maximum assessment duration (0 = no limit)"
-    )
-    if max_duration == 0:
-        max_duration = None
     
     top_k = st.sidebar.slider(
         "Number of Results",
         min_value=1,
-        max_value=20,
+        max_value=10,
         value=5
     )
     
@@ -270,42 +248,49 @@ def show_recommendations():
             if submit_button and query:
                 with st.spinner("Generating recommendations..."):
                     if use_direct and DIRECT_MODE:
-                        results = get_recommendations_direct(query, max_duration, top_k)
+                        results = get_recommendations_direct(query, top_k=top_k)
                     else:
-                        results = get_recommendations_from_api(query, max_duration, top_k)
+                        results = get_recommendations_from_api(query, top_k=top_k)
                     
                     display_recommendations(results)
             
-        else:  # URL input
+        elif input_method == "Job Description URL":
             url = st.text_input(
                 "Enter job posting URL:",
-                placeholder="https://www.example.com/job-posting"
+                placeholder="https://example.com/jobs/software-engineer"
             )
             
-            submit_button = st.button("Extract & Get Recommendations")
+            submit_button = st.button("Get Recommendations")
             
             if submit_button and url:
-                with st.spinner("Extracting text from URL..."):
-                    query = extract_text_from_url(url)
-                    
-                if query:
-                    # Show extracted text
-                    with st.expander("Extracted text from URL", expanded=False):
-                        st.markdown(f"<div class='url-info'>The following text was extracted from {url}:</div>", unsafe_allow_html=True)
-                        st.text(query[:500] + "..." if len(query) > 500 else query)
-                    
-                    with st.spinner("Generating recommendations..."):
+                with st.spinner("Extracting job description and generating recommendations..."):
+                    # Extract text from URL
+                    try:
+                        job_description = extract_text_from_url(url)
+                        if not job_description:
+                            st.error("Could not extract job description from the provided URL.")
+                            return
+                            
+                        # Get recommendations
                         if use_direct and DIRECT_MODE:
-                            results = get_recommendations_direct(query, max_duration, top_k)
+                            results = get_recommendations_direct(job_description, top_k=top_k)
                         else:
-                            results = get_recommendations_from_api(query, max_duration, top_k)
+                            results = get_recommendations_from_api(job_description, top_k=top_k)
+                        
+                        # Show the extracted text and recommendations
+                        with st.expander("Extracted Job Description", expanded=False):
+                            st.markdown(job_description[:1000] + "..." if len(job_description) > 1000 else job_description)
                         
                         display_recommendations(results)
+                        
+                    except Exception as e:
+                        st.error(f"Error processing URL: {str(e)}")
+                        logger.error(f"Error processing URL: {str(e)}", exc_info=True)
     
     # Footer
     st.markdown("""
     <div class="footer">
-        SHL Assessment Recommender | Powered by AI
+        SHL Assessment Recommender | Made with ❤️ by Arjun Chouksey
     </div>
     """, unsafe_allow_html=True)
 

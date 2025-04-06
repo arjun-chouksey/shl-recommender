@@ -1,12 +1,14 @@
 import json
-import numpy as np
-from typing import Dict, List, Any, Set
-import logging
 import os
+import logging
+import asyncio
+from typing import List, Dict, Any, Tuple, Set, Optional
+import numpy as np
 import pandas as pd
-from pathlib import Path
+from tabulate import tabulate
+from datetime import datetime
 
-from recommender import SHLRecommender, Assessment
+from recommender import get_recommender, RecommendationResult
 
 # Configure logging
 logging.basicConfig(
@@ -15,269 +17,376 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class EvaluationData:
-    """Data class for evaluation data"""
-    def __init__(self, query: str, relevant_assessments: List[str]):
-        self.query = query
-        self.relevant_assessments = relevant_assessments
-
-def load_test_data(path: str = None) -> List[EvaluationData]:
-    """Load test data from a JSON file or use default test data"""
-    if path and os.path.exists(path):
-        try:
-            with open(path, 'r') as f:
-                data = json.load(f)
+class SHLEvaluator:
+    """
+    Evaluator for SHL recommendation system
+    
+    This class evaluates the recommendation system using standard IR metrics:
+    - Mean Average Precision @ K (MAP@K)
+    - Recall @ K
+    - Mean Reciprocal Rank (MRR)
+    - Hit Rate @ K
+    """
+    
+    def __init__(self, queries_path: str = "benchmark_queries.json"):
+        """
+        Initialize the evaluator
+        
+        Args:
+            queries_path: Path to benchmark queries JSON file
+        """
+        self.queries_path = queries_path
+        self.queries = []
+        
+        # Load queries if file exists
+        if os.path.exists(queries_path):
+            self._load_queries()
+        else:
+            logger.warning(f"Benchmark queries file not found: {queries_path}")
+            # Create sample benchmark queries
+            self._create_sample_queries()
             
-            return [EvaluationData(**item) for item in data]
+    def _create_sample_queries(self):
+        """Create sample benchmark queries"""
+        sample_queries = [
+            {
+                "query": "Frontend Developer with React experience",
+                "relevant_assessments": [
+                    "Verify Coding",
+                    "JavaScript Programming Skills",
+                    "Verify Cognitive Ability Assessment",
+                    "Problem Solving Assessment"
+                ]
+            },
+            {
+                "query": "Data Scientist with machine learning experience",
+                "relevant_assessments": [
+                    "Python Programming Skills",
+                    "Data Science Assessment",
+                    "Numerical Reasoning Test",
+                    "Problem Solving Assessment"
+                ]
+            },
+            {
+                "query": "Project Manager for software development team",
+                "relevant_assessments": [
+                    "Project Management Assessment",
+                    "Leadership Assessment",
+                    "ADEPT-15 Personality Assessment",
+                    "Situational Judgment Test"
+                ]
+            },
+            {
+                "query": "Sales Executive for enterprise software",
+                "relevant_assessments": [
+                    "Sales Assessment",
+                    "ADEPT-15 Personality Assessment",
+                    "Emotional Intelligence Assessment",
+                    "Situational Judgment Test"
+                ]
+            },
+            {
+                "query": "Customer Service Representative for call center",
+                "relevant_assessments": [
+                    "Customer Service Assessment",
+                    "Work Strengths Questionnaire",
+                    "Situational Judgment Test",
+                    "Verbal Reasoning Test"
+                ]
+            }
+        ]
+        
+        self.queries = sample_queries
+        
+        # Save sample queries
+        with open(self.queries_path, 'w', encoding='utf-8') as f:
+            json.dump(sample_queries, f, indent=2)
+            
+        logger.info(f"Created sample benchmark queries in {self.queries_path}")
+    
+    def _load_queries(self):
+        """Load benchmark queries from file"""
+        try:
+            with open(self.queries_path, 'r', encoding='utf-8') as f:
+                self.queries = json.load(f)
+            logger.info(f"Loaded {len(self.queries)} benchmark queries from {self.queries_path}")
         except Exception as e:
-            logger.error(f"Error loading test data: {str(e)}")
+            logger.error(f"Error loading benchmark queries: {str(e)}")
+            self.queries = []
     
-    # Default test data if no file provided or file loading failed
-    default_data = [
-        {
-            "query": "I am hiring for Java developers who can also collaborate effectively with my business teams. Looking for an assessment(s) that can be completed in 40 minutes.",
-            "relevant_assessments": ["Java", "Collaboration", "Team Skills", "Programming", "Developer", "Technical"]
-        },
-        {
-            "query": "Looking to hire mid-level professionals who are proficient in Python, SQL and JavaScript. Need an assessment package that can test all skills with max duration of 60 minutes.",
-            "relevant_assessments": ["Python", "SQL", "JavaScript", "Programming", "Developer", "Technical"]
-        },
-        {
-            "query": "I am hiring for an analyst and wants applications to screen using Cognitive and personality tests, what options are available within 45 mins.",
-            "relevant_assessments": ["Analyst", "Cognitive", "Personality", "Problem Solving", "Data", "Analytical"]
-        },
-        {
-            "query": "Need to evaluate leadership potential for management positions. Assessment should be adaptive and take less than 30 minutes.",
-            "relevant_assessments": ["Leadership", "Management", "Potential", "Executive", "Decision Making"]
-        },
-        {
-            "query": "Looking for a comprehensive assessment for sales professionals that evaluates both sales knowledge and personality traits.",
-            "relevant_assessments": ["Sales", "Personality", "Knowledge", "Customer", "Behavior"]
-        }
-    ]
+    @staticmethod
+    def calculate_average_precision(relevant: Set[str], recommended: List[str], k: int) -> float:
+        """
+        Calculate Average Precision @ K
+        
+        Args:
+            relevant: Set of relevant assessment names
+            recommended: List of recommended assessment names in order
+            k: Number of recommendations to consider
+            
+        Returns:
+            Average Precision @ K
+        """
+        if not relevant or not recommended:
+            return 0.0
+        
+        recommended = recommended[:k]
+        hits = 0
+        sum_precisions = 0.0
+        
+        for i, item in enumerate(recommended):
+            if item in relevant:
+                hits += 1
+                precision_at_i = hits / (i + 1)
+                sum_precisions += precision_at_i
+        
+        return sum_precisions / min(len(relevant), k) if hits > 0 else 0.0
     
-    return [EvaluationData(**item) for item in default_data]
-
-def is_assessment_relevant(assessment: Dict[str, Any], relevant_keywords: List[str]) -> bool:
-    """Check if an assessment is relevant based on keywords"""
-    # Create a text representation of the assessment
-    assessment_text = f"{assessment['name'].lower()} {' '.join([t.lower() for t in assessment['test_type']])}"
+    @staticmethod
+    def calculate_recall(relevant: Set[str], recommended: List[str], k: int) -> float:
+        """
+        Calculate Recall @ K
+        
+        Args:
+            relevant: Set of relevant assessment names
+            recommended: List of recommended assessment names in order
+            k: Number of recommendations to consider
+            
+        Returns:
+            Recall @ K
+        """
+        if not relevant:
+            return 0.0
+        
+        recommended_set = set(recommended[:k])
+        return len(recommended_set.intersection(relevant)) / len(relevant)
     
-    # Check if any relevant keyword is found in the assessment text
-    for keyword in relevant_keywords:
-        if keyword.lower() in assessment_text:
-            return True
-    
-    return False
-
-def calculate_recall_at_k(recommendations: List[Dict[str, Any]], relevant_keywords: List[str], k: int) -> float:
-    """
-    Calculate Recall@K
-    
-    Recall@K = Number of relevant assessments in top K / Total relevant assessments
-    """
-    if not recommendations or not relevant_keywords:
+    @staticmethod
+    def calculate_mrr(relevant: Set[str], recommended: List[str], k: int) -> float:
+        """
+        Calculate Mean Reciprocal Rank
+        
+        Args:
+            relevant: Set of relevant assessment names
+            recommended: List of recommended assessment names in order
+            k: Number of recommendations to consider
+            
+        Returns:
+            Mean Reciprocal Rank
+        """
+        if not relevant or not recommended:
+            return 0.0
+        
+        recommended = recommended[:k]
+        
+        for i, item in enumerate(recommended):
+            if item in relevant:
+                return 1.0 / (i + 1)
+        
         return 0.0
     
-    # Limit to top K recommendations
-    recommendations = recommendations[:k]
-    
-    # Count relevant assessments in recommendations
-    relevant_count = sum(1 for rec in recommendations if is_assessment_relevant(rec, relevant_keywords))
-    
-    # Calculate recall
-    # For this implementation, we use the number of relevant keywords as denominator
-    # In a real scenario, you'd want the actual count of all relevant items in the dataset
-    return relevant_count / len(relevant_keywords)
-
-def calculate_average_precision(recommendations: List[Dict[str, Any]], relevant_keywords: List[str], k: int) -> float:
-    """
-    Calculate Average Precision (AP) at K
-    
-    AP@K = (1/R) * sum(Precision@i * rel(i)) for i=1 to K
-    where:
-    - R = min(K, total relevant assessments)
-    - Precision@i = Number of relevant items up to position i / i
-    - rel(i) = 1 if the item at position i is relevant, 0 otherwise
-    """
-    if not recommendations or not relevant_keywords:
-        return 0.0
-    
-    # Limit to top K recommendations
-    recommendations = recommendations[:k]
-    
-    relevant_sum = 0
-    relevant_count = 0
-    
-    for i, recommendation in enumerate(recommendations):
-        is_relevant = is_assessment_relevant(recommendation, relevant_keywords)
+    @staticmethod
+    def calculate_hit_rate(relevant: Set[str], recommended: List[str], k: int) -> float:
+        """
+        Calculate Hit Rate @ K
         
-        if is_relevant:
-            relevant_count += 1
-            # Precision at this point = relevant items so far / items seen so far
-            precision_at_i = relevant_count / (i + 1)
-            relevant_sum += precision_at_i
-    
-    # If no relevant items found, AP is 0
-    if relevant_count == 0:
-        return 0.0
-    
-    # Calculate AP
-    # Normalize by min(K, number of relevant keywords)
-    return relevant_sum / min(k, len(relevant_keywords))
-
-def calculate_metrics(ground_truth: Dict[str, List[str]], predictions: Dict[str, List[Dict[str, Any]]], k: int = 3) -> Dict[str, float]:
-    """
-    Implements SHL's exact formulas for:
-    - Mean Recall@3
-    - MAP@3
-    
-    Args:
-        ground_truth: Dictionary mapping query IDs to lists of relevant assessment keywords
-        predictions: Dictionary mapping query IDs to lists of predicted assessment dictionaries
-        k: K value for the metrics (default: 3)
-    
-    Returns:
-        Dictionary with Mean Recall@K and MAP@K values
-    """
-    if not ground_truth or not predictions:
-        return {"Mean_Recall@K": 0.0, "MAP@K": 0.0}
-    
-    # Ensure we have the same queries in both dictionaries
-    common_queries = set(ground_truth.keys()) & set(predictions.keys())
-    
-    if not common_queries:
-        logger.warning("No common queries between ground truth and predictions")
-        return {"Mean_Recall@K": 0.0, "MAP@K": 0.0}
-    
-    recall_values = []
-    ap_values = []
-    
-    for query_id in common_queries:
-        relevant_keywords = ground_truth[query_id]
-        recommendations = predictions[query_id]
+        Args:
+            relevant: Set of relevant assessment names
+            recommended: List of recommended assessment names in order
+            k: Number of recommendations to consider
+            
+        Returns:
+            Hit Rate @ K (1.0 if there's at least one hit, 0.0 otherwise)
+        """
+        if not relevant or not recommended:
+            return 0.0
         
-        # Calculate Recall@K
-        recall = calculate_recall_at_k(recommendations, relevant_keywords, k)
-        recall_values.append(recall)
+        recommended_set = set(recommended[:k])
+        return 1.0 if recommended_set.intersection(relevant) else 0.0
+    
+    async def evaluate_query(self, 
+                            query: str, 
+                            relevant_assessments: List[str], 
+                            k_values: List[int] = [1, 3, 5]) -> Dict[str, Dict[int, float]]:
+        """
+        Evaluate a single query
         
-        # Calculate AP@K
-        ap = calculate_average_precision(recommendations, relevant_keywords, k)
-        ap_values.append(ap)
-    
-    # Calculate Mean Recall@K and MAP@K
-    mean_recall = sum(recall_values) / len(recall_values)
-    map_k = sum(ap_values) / len(ap_values)
-    
-    return {
-        f"Mean_Recall@{k}": mean_recall,
-        f"MAP@{k}": map_k
-    }
-
-def evaluate_recommender(recommender: SHLRecommender, test_data: List[EvaluationData], k: int = 3) -> Dict[str, float]:
-    """
-    Evaluate a recommender using the given test data
-    
-    Args:
-        recommender: SHLRecommender instance
-        test_data: List of EvaluationData objects
-        k: K value for evaluation metrics
-    
-    Returns:
-        Dictionary with evaluation metrics
-    """
-    # Prepare ground truth and predictions
-    ground_truth = {}
-    predictions = {}
-    
-    # Get recommendations for each query
-    for i, data in enumerate(test_data):
-        query_id = f"query_{i}"
-        ground_truth[query_id] = data.relevant_assessments
-        
+        Args:
+            query: Query string
+            relevant_assessments: List of relevant assessment names
+            k_values: List of k values to evaluate
+            
+        Returns:
+            Dictionary with metrics for each k value
+        """
         # Get recommendations
-        recommendations = recommender.recommend(data.query, top_k=k)
-        predictions[query_id] = recommendations
+        recommender = get_recommender()
+        max_k = max(k_values)
+        recommendations = await recommender.get_recommendations(query, num_recommendations=max_k)
         
-        # Log results for analysis
-        logger.info(f"Query: {data.query}")
-        logger.info(f"  Relevant keywords: {data.relevant_assessments}")
-        logger.info(f"  Recommendations: {[rec['name'] for rec in recommendations]}")
-    
-    # Calculate metrics
-    metrics = calculate_metrics(ground_truth, predictions, k)
-    
-    # Log metrics
-    logger.info(f"Evaluation metrics (k={k}):")
-    for metric, value in metrics.items():
-        logger.info(f"  {metric}: {value:.4f}")
-    
-    return metrics
-
-def main():
-    """Main function to run the evaluation"""
-    # Load test data
-    test_data = load_test_data()
-    
-    # Find assessment data file
-    if os.path.exists("shl_assessments.json"):
-        data_path = "shl_assessments.json"
-    elif os.path.exists("sample_assessments.json"):
-        data_path = "sample_assessments.json"
-    else:
-        logger.error("No assessment data found. Please run scraper.py first.")
-        return
-    
-    # Initialize recommender
-    recommender = SHLRecommender(data_path=data_path)
-    
-    # Evaluate
-    k_values = [1, 3, 5]
-    results = {}
-    
-    for k in k_values:
-        metrics = evaluate_recommender(recommender, test_data, k)
-        results[k] = metrics
-    
-    # Print summary
-    print("\nEvaluation Summary:")
-    print("=" * 40)
-    for k, metrics in results.items():
-        print(f"k = {k}:")
-        for metric, value in metrics.items():
-            print(f"  {metric}: {value:.4f}")
-    
-    # Create a more detailed results dataframe
-    detailed_results = []
-    
-    for i, data in enumerate(test_data):
-        query_id = f"query_{i}"
-        recommendations = recommender.recommend(data.query, top_k=max(k_values))
+        # Extract assessment names
+        recommended_names = [rec.assessment_name for rec in recommendations]
+        relevant_set = set(relevant_assessments)
         
-        # Calculate metrics for this specific query
-        recall_values = []
-        ap_values = []
+        # Calculate metrics for each k
+        results = {
+            "MAP": {},
+            "Recall": {},
+            "MRR": {},
+            "HitRate": {}
+        }
         
         for k in k_values:
-            recall = calculate_recall_at_k(recommendations, data.relevant_assessments, k)
-            ap = calculate_average_precision(recommendations, data.relevant_assessments, k)
-            
-            recall_values.append(recall)
-            ap_values.append(ap)
+            if k > len(recommended_names):
+                continue
+                
+            results["MAP"][k] = self.calculate_average_precision(relevant_set, recommended_names, k)
+            results["Recall"][k] = self.calculate_recall(relevant_set, recommended_names, k)
+            results["MRR"][k] = self.calculate_mrr(relevant_set, recommended_names, k)
+            results["HitRate"][k] = self.calculate_hit_rate(relevant_set, recommended_names, k)
         
-        # Add to detailed results
-        detailed_results.append({
-            "query": data.query,
-            "relevant_keywords": ", ".join(data.relevant_assessments),
-            "top_recommendations": ", ".join([rec["name"] for rec in recommendations[:3]]),
-            **{f"Recall@{k}": recall_values[i] for i, k in enumerate(k_values)},
-            **{f"AP@{k}": ap_values[i] for i, k in enumerate(k_values)}
-        })
+        return results
     
-    # Save detailed results to CSV
-    detailed_df = pd.DataFrame(detailed_results)
-    detailed_df.to_csv("evaluation_results.csv", index=False)
-    print(f"Detailed results saved to evaluation_results.csv")
+    async def evaluate_all(self, k_values: List[int] = [1, 3, 5], save_results: bool = True) -> Tuple[Dict[str, Dict[int, float]], List[Dict[str, Any]]]:
+        """
+        Evaluate all benchmark queries
+        
+        Args:
+            k_values: List of k values to evaluate
+            save_results: Whether to save results to file
+            
+        Returns:
+            Tuple of (aggregate metrics, per-query results)
+        """
+        if not self.queries:
+            logger.warning("No benchmark queries to evaluate")
+            return {}, []
+        
+        all_results = []
+        
+        # Evaluate each query
+        for query_data in self.queries:
+            query = query_data["query"]
+            relevant = query_data["relevant_assessments"]
+            
+            try:
+                results = await self.evaluate_query(query, relevant, k_values)
+                
+                all_results.append({
+                    "query": query,
+                    "relevant": relevant,
+                    "results": results
+                })
+                
+                logger.info(f"Evaluated query: '{query}'")
+            except Exception as e:
+                logger.error(f"Error evaluating query '{query}': {str(e)}")
+        
+        # Calculate aggregate metrics
+        agg_metrics = {
+            "MAP": {k: 0.0 for k in k_values},
+            "Recall": {k: 0.0 for k in k_values},
+            "MRR": {k: 0.0 for k in k_values},
+            "HitRate": {k: 0.0 for k in k_values}
+        }
+        
+        if all_results:
+            for k in k_values:
+                map_values = [r["results"]["MAP"].get(k, 0.0) for r in all_results]
+                recall_values = [r["results"]["Recall"].get(k, 0.0) for r in all_results]
+                mrr_values = [r["results"]["MRR"].get(k, 0.0) for r in all_results]
+                hit_rate_values = [r["results"]["HitRate"].get(k, 0.0) for r in all_results]
+                
+                agg_metrics["MAP"][k] = np.mean(map_values)
+                agg_metrics["Recall"][k] = np.mean(recall_values)
+                agg_metrics["MRR"][k] = np.mean(mrr_values)
+                agg_metrics["HitRate"][k] = np.mean(hit_rate_values)
+        
+        # Save results
+        if save_results:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            results_path = f"evaluation_results_{timestamp}.json"
+            
+            with open(results_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "timestamp": timestamp,
+                    "aggregate_metrics": agg_metrics,
+                    "query_results": all_results
+                }, f, indent=2)
+            
+            logger.info(f"Saved evaluation results to {results_path}")
+        
+        return agg_metrics, all_results
+    
+    def print_evaluation_summary(self, metrics: Dict[str, Dict[int, float]], k_values: List[int] = [1, 3, 5]):
+        """
+        Print evaluation summary
+        
+        Args:
+            metrics: Metrics dictionary
+            k_values: List of k values to display
+        """
+        if not metrics:
+            print("No evaluation metrics available")
+            return
+        
+        # Create data for table
+        table_data = []
+        
+        for metric_name in ["MAP", "Recall", "MRR", "HitRate"]:
+            row = [metric_name]
+            for k in k_values:
+                if k in metrics[metric_name]:
+                    row.append(f"{metrics[metric_name][k]:.4f}")
+                else:
+                    row.append("N/A")
+            table_data.append(row)
+        
+        # Create headers
+        headers = ["Metric"] + [f"@{k}" for k in k_values]
+        
+        # Print table
+        print("\nEvaluation Summary:")
+        print(tabulate(table_data, headers=headers, tablefmt="grid"))
+        
+        # Check if metrics meet target
+        for k in k_values:
+            if k == 3:  # Check specifically for k=3
+                map_k = metrics["MAP"].get(k, 0.0)
+                recall_k = metrics["Recall"].get(k, 0.0)
+                
+                if map_k >= 0.7 and recall_k >= 0.7:
+                    print(f"\nMETRIC TARGET MET! MAP@{k} = {map_k:.4f}, Recall@{k} = {recall_k:.4f}")
+                else:
+                    print(f"\nMETRIC TARGET NOT MET. MAP@{k} = {map_k:.4f}, Recall@{k} = {recall_k:.4f}")
+                    print("Target: MAP@3 >= 0.7, Recall@3 >= 0.7")
+
+async def evaluate_recommendations(k_values: List[int] = [1, 3, 5]) -> Dict[str, Dict[int, float]]:
+    """
+    Evaluate the recommendation system
+    
+    Args:
+        k_values: List of k values to evaluate
+        
+    Returns:
+        Dictionary with metrics for each k value
+    """
+    evaluator = SHLEvaluator()
+    metrics, _ = await evaluator.evaluate_all(k_values=k_values)
+    evaluator.print_evaluation_summary(metrics, k_values)
+    return metrics
+
+async def main():
+    """Main function to run evaluation"""
+    # Load environment variables
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        logger.warning("python-dotenv not installed, skipping environment variable loading")
+    
+    # Run evaluation
+    await evaluate_recommendations()
 
 if __name__ == "__main__":
-    main() 
+    asyncio.run(main()) 

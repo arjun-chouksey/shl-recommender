@@ -20,13 +20,32 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual environment
+# Virtual Environment
 venv/
 env/
 ENV/
-
-# Environment variables
 .env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+*.log
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# Keep only the main assessments file
+shl_assessments_*.json
+!shl_assessments.json
 
 # Data files
 # shl_assessments.json  # Commented out to include in repository
@@ -37,15 +56,10 @@ evaluation_results.csv
 # Database
 .chroma_db/
 
-# Logs
-*.log
-
 # IDE specific files
-.idea/
-.vscode/
 *.swp
 *.swo
 
 # OS specific files
-.DS_Store
-Thumbs.db 
+*.DS_Store
+*.Thumbs.db 

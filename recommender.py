@@ -5,6 +5,8 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 import os
+import random
+import asyncio
 from typing import List, Dict, Any, Optional, Union
 from pydantic import BaseModel, Field
 import logging
@@ -34,410 +36,540 @@ if GOOGLE_API_KEY:
 else:
     logger.warning("GOOGLE_API_KEY not found in environment variables. Gemini API will not be available.")
 
-# Define assessment schema
-class Assessment(BaseModel):
-    name: str
-    url: str
-    remote_testing: bool
-    adaptive_irt: bool
-    duration: Optional[int] = None  # in minutes
+# Define recommendation result schema
+class RecommendationResult(BaseModel):
+    assessment_name: str
+    assessment_url: str
+    relevance_score: float
+    explanation: Optional[str] = None
+    duration: Optional[int] = None
+    remote_testing: bool = False
+    adaptive_irt: bool = False
     test_type: List[str] = Field(default_factory=list)
 
 class SHLRecommender:
-    def __init__(self, data_path: str = "shl_assessments.json"):
+    """
+    SHL Assessment Recommender using Google Gemini API and text similarity
+    
+    This class uses Google's Gemini API to recommend SHL assessments based on
+    job descriptions or user queries. It uses a combination of text similarity
+    matching and LLM-powered recommendations.
+    """
+    
+    # Prompt template for Gemini AI
+    SYSTEM_PROMPT = """You are an expert in SHL assessments and pre-employment testing.
+Your task is to recommend the most appropriate SHL assessments for a specific job role or query.
+Based on the job description or query, analyze what skills need to be assessed and recommend the most relevant assessments.
+Consider the following factors:
+- Cognitive abilities required (numerical, verbal, logical, etc.)
+- Personality traits that would be important
+- Technical knowledge needed
+- Required soft skills and competencies
+- Leadership requirements if applicable
+
+You will be provided with a set of available SHL assessments in JSON format.
+Use ONLY assessments from this list when making your recommendations.
+"""
+
+    PROMPT_TEMPLATE = """
+Analyze the following job description or query:
+---
+{query}
+---
+
+Based on this information, recommend the top 3 most appropriate SHL assessments from the provided list.
+The available SHL assessments are:
+{assessment_info}
+
+For each assessment you recommend, provide:
+1. The exact name of the assessment as it appears in the list
+2. A score from 0.0 to 1.0 indicating relevance to the job or query (higher is more relevant)
+3. A 1-2 sentence explanation of why this assessment is appropriate
+
+Format your response as a JSON array like this:
+```json
+[
+  {
+    "assessment_name": "Name of first assessment",
+    "relevance_score": 0.95,
+    "explanation": "Explanation for first assessment"
+  },
+  {
+    "assessment_name": "Name of second assessment",
+    "relevance_score": 0.85,
+    "explanation": "Explanation for second assessment"
+  },
+  {
+    "assessment_name": "Name of third assessment",
+    "relevance_score": 0.75,
+    "explanation": "Explanation for third assessment"
+  }
+]
+```
+
+Only include assessments from the provided list. Return EXACTLY 3 recommendations.
+"""
+
+    FALLBACK_PROMPT = """
+You are an expert in SHL assessments. Provide a concise response to this query about pre-employment testing:
+---
+{query}
+---
+
+Your response should be helpful but brief (maximum 3 sentences).
+"""
+
+    def __init__(self, 
+                 assessments_path: str = "shl_assessments.json", 
+                 api_key: Optional[str] = None,
+                 use_gemini: bool = True):
         """
-        Initialize the SHL Recommender
+        Initialize SHL Recommender
         
         Args:
-            data_path: Path to the JSON file containing assessment data
+            assessments_path: Path to JSON file containing SHL assessments
+            api_key: Google API key for Gemini API (if None, will try to load from env)
+            use_gemini: Whether to use Gemini API for recommendations
         """
-        self.assessments = self._load_assessments(data_path)
+        self.api_key = api_key or os.environ.get("GOOGLE_API_KEY")
+        self.use_gemini = use_gemini
         
-        # For vector similarity search
-        self.vectorizer = TfidfVectorizer(stop_words='english')
-        self.assessment_vectors = None
+        # Initialize Gemini client if API key is available
+        if self.use_gemini and self.api_key:
+            try:
+                genai.configure(api_key=self.api_key)
+                self.model = genai.GenerativeModel('gemini-pro')
+                logger.info("Gemini API initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize Gemini API: {str(e)}")
+                self.use_gemini = False
+        else:
+            self.use_gemini = False
+            if use_gemini:
+                logger.warning("No API key provided, will use fallback recommendation method")
         
-        # For keyword matching
-        self.keyword_index = {}
-        
-        # Build indices
-        self._build_indices()
-    
-    def _load_assessments(self, data_path: str) -> List[Assessment]:
-        """Load assessments from a JSON file"""
-        if not os.path.exists(data_path):
-            logger.warning(f"Assessment data file not found at {data_path}. Using empty list.")
-            return []
-        
+        # Load assessments
         try:
-            with open(data_path, 'r') as f:
-                assessment_dicts = json.load(f)
-            
-            return [Assessment(**assessment) for assessment in assessment_dicts]
+            self.load_assessments(assessments_path)
         except Exception as e:
             logger.error(f"Error loading assessments: {str(e)}")
-            return []
+            # Create empty assessments - will need to load later
+            self.assessments = []
+            self.assessment_texts = []
+            self.vectorizer = None
+            self.tfidf_matrix = None
+        
+    def load_assessments(self, assessments_path: str) -> None:
+        """
+        Load assessments from JSON file
+        
+        Args:
+            assessments_path: Path to JSON file containing SHL assessments
+        """
+        try:
+            if os.path.exists(assessments_path):
+                with open(assessments_path, 'r', encoding='utf-8') as f:
+                    self.assessments = json.load(f)
+                logger.info(f"Loaded {len(self.assessments)} assessments from {assessments_path}")
+                
+                # Check for required fields
+                if self.assessments and all(isinstance(a, dict) and 'name' in a and 'url' in a for a in self.assessments):
+                    # Create text for each assessment for TF-IDF vectorization
+                    self.assessment_texts = []
+                    for assessment in self.assessments:
+                        text = assessment['name']
+                        if 'test_type' in assessment and assessment['test_type']:
+                            if isinstance(assessment['test_type'], list):
+                                text += " " + " ".join(assessment['test_type'])
+                            else:
+                                text += " " + assessment['test_type']
+                        self.assessment_texts.append(text)
+                    
+                    # Create TF-IDF vectorizer and matrix
+                    self.vectorizer = TfidfVectorizer(stop_words='english')
+                    self.tfidf_matrix = self.vectorizer.fit_transform(self.assessment_texts)
+                    logger.info("Created TF-IDF matrix for text similarity matching")
+                else:
+                    logger.error(f"Invalid assessment data format in {assessments_path}")
+                    self.assessments = []
+                    self.assessment_texts = []
+                    self.vectorizer = None
+                    self.tfidf_matrix = None
+            else:
+                logger.warning(f"Assessments file not found: {assessments_path}")
+                self.assessments = []
+                self.assessment_texts = []
+                self.vectorizer = None
+                self.tfidf_matrix = None
+        except Exception as e:
+            logger.error(f"Error loading assessments from {assessments_path}: {str(e)}")
+            raise
     
-    def _build_indices(self):
-        """Build indices for efficient recommendation"""
-        if not self.assessments:
-            logger.warning("No assessments to build indices for")
-            return
+    def clean_gemini_response(self, response: str) -> List[Dict[str, Any]]:
+        """
+        Clean JSON from Gemini response
         
-        logger.info(f"Building indices for {len(self.assessments)} assessments")
-        
-        # Prepare documents for TF-IDF vectorization
-        docs = []
-        
-        for i, assessment in enumerate(self.assessments):
-            # Create document text
-            doc_text = f"{assessment.name} {' '.join(assessment.test_type)}"
-            docs.append(doc_text)
+        Args:
+            response: Raw response from Gemini
             
-            # Build keyword index
-            self._add_to_keyword_index(i, assessment)
-        
-        # Create TF-IDF vectors
-        self.assessment_vectors = self.vectorizer.fit_transform(docs)
-        
-        logger.info("Indices built successfully")
-    
-    def _add_to_keyword_index(self, idx: int, assessment: Assessment):
-        """Add an assessment to the keyword index"""
-        # Extract keywords from name
-        name_keywords = re.findall(r'\w+', assessment.name.lower())
-        
-        # Add assessment name keywords to index
-        for keyword in name_keywords:
-            if len(keyword) > 2:  # Skip very short words
-                if keyword not in self.keyword_index:
-                    self.keyword_index[keyword] = []
-                if idx not in self.keyword_index[keyword]:
-                    self.keyword_index[keyword].append(idx)
-        
-        # Add test types to index
-        for test_type in assessment.test_type:
-            keyword = test_type.lower()
-            if keyword not in self.keyword_index:
-                self.keyword_index[keyword] = []
-            if idx not in self.keyword_index[keyword]:
-                self.keyword_index[keyword].append(idx)
-            
-            # Also add individual words from test type
-            type_keywords = re.findall(r'\w+', test_type.lower())
-            for type_keyword in type_keywords:
-                if len(type_keyword) > 2:  # Skip very short words
-                    if type_keyword not in self.keyword_index:
-                        self.keyword_index[type_keyword] = []
-                    if idx not in self.keyword_index[type_keyword]:
-                        self.keyword_index[type_keyword].append(idx)
-    
-    def _extract_keywords(self, query: str) -> List[str]:
-        """Extract keywords from a query string"""
-        # Simple extraction of words, could be improved with NLP
-        keywords = re.findall(r'\w+', query.lower())
-        return [k for k in keywords if len(k) > 2]  # Skip very short words
-    
-    def _keyword_search(self, query: str, top_k: int = 10) -> List[Dict[str, Union[int, float]]]:
-        """
-        Search using keyword matching
-        
         Returns:
-            List of dicts with assessment index and score
+            List of recommendation dictionaries
         """
-        keywords = self._extract_keywords(query)
-        
-        # Count keyword matches for each assessment
-        assessment_scores = {}
-        
-        for keyword in keywords:
-            if keyword in self.keyword_index:
-                for idx in self.keyword_index[keyword]:
-                    if idx not in assessment_scores:
-                        assessment_scores[idx] = 0
-                    assessment_scores[idx] += 1
-        
-        # Normalize scores by the number of keywords
-        results = []
-        for idx, score in assessment_scores.items():
-            results.append({
-                "idx": idx,
-                "score": score / max(1, len(keywords))
-            })
-        
-        # Sort by score in descending order
-        results.sort(key=lambda x: x["score"], reverse=True)
-        
-        return results[:top_k]
-    
-    def _vector_search(self, query: str, top_k: int = 10) -> List[Dict[str, Union[int, float]]]:
-        """
-        Search using vector similarity
-        
-        Returns:
-            List of dicts with assessment index and score
-        """
-        if not self.assessments:
-            return []
-        
-        # Transform query to vector
-        query_vector = self.vectorizer.transform([query])
-        
-        # Calculate similarity with all assessments
-        similarities = cosine_similarity(query_vector, self.assessment_vectors)[0]
-        
-        # Create results
-        results = []
-        for idx, score in enumerate(similarities):
-            results.append({
-                "idx": idx,
-                "score": float(score)
-            })
-        
-        # Sort by score in descending order
-        results.sort(key=lambda x: x["score"], reverse=True)
-        
-        return results[:top_k]
-    
-    def _gemini_classify(self, query: str, assessment: Assessment) -> float:
-        """
-        Use Gemini to classify how well an assessment matches a query
-        
-        Returns:
-            Score between 0 and 1
-        """
-        if not GOOGLE_API_KEY:
-            return 0.0
+        # Extract JSON string from response if needed
+        json_match = re.search(r'```(?:json)?(.*?)```', response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1).strip()
+        else:
+            json_str = response.strip()
         
         try:
-            # Build prompt
-            prompt = f"""
-            Rate how well the following SHL assessment matches the user's requirements.
+            # Clean any potential markdown or extra characters
+            json_str = re.sub(r'^[^[{]*', '', json_str)
+            json_str = re.sub(r'[^}\]]*$', '', json_str)
             
-            User query: {query}
-            
-            Assessment details:
-            - Name: {assessment.name}
-            - Test types: {', '.join(assessment.test_type)}
-            - Remote testing: {assessment.remote_testing}
-            - Adaptive testing: {assessment.adaptive_irt}
-            - Duration: {assessment.duration if assessment.duration else 'Unknown'} minutes
-            
-            Output just a number between 0 and 1, where 1 means perfect match and 0 means not relevant at all.
-            """
-            
-            model = genai.GenerativeModel('gemini-pro')
-            response = model.generate_content(prompt)
-            
-            # Parse score from response
-            score_text = response.text.strip()
-            # Extract a float from the response
-            match = re.search(r'(\d+\.\d+|\d+)', score_text)
-            if match:
-                score = float(match.group(1))
-                return min(1.0, max(0.0, score))  # Ensure score is between 0 and 1
-            
-            return 0.0
-        except Exception as e:
-            logger.error(f"Error with Gemini API: {str(e)}")
-            return 0.0
+            # Parse JSON
+            recommendations = json.loads(json_str)
+            return recommendations
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse JSON from Gemini response: {response}")
+            return []
     
-    def _extract_duration_limit(self, query: str) -> Optional[int]:
-        """Extract duration limit from query"""
-        # Look for patterns like "under 30 minutes", "less than 25 min", etc.
-        patterns = [
-            r'under (\d+) min',
-            r'less than (\d+) min',
-            r'no more than (\d+) min',
-            r'maximum (\d+) min',
-            r'max (\d+) min',
-            r'(\d+) min or less',
-            r'(\d+) minutes or less',
-            r'(\d+) min max',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, query.lower())
-            if match:
-                return int(match.group(1))
-        
-        return None
-    
-    def recommend(self, query: str, max_duration: Optional[int] = None, top_k: int = 10) -> List[Dict]:
+    async def get_recommendations_gemini(self, query: str, num_recommendations: int = 3) -> List[RecommendationResult]:
         """
-        Recommend SHL assessments based on a query
+        Get recommendations using Gemini API
+        
+        Args:
+            query: Query string or job description
+            num_recommendations: Number of recommendations to return
+            
+        Returns:
+            List of RecommendationResult objects
+        """
+        if not self.use_gemini or not self.api_key:
+            logger.warning("Gemini API not configured, falling back to text similarity")
+            return await self.get_recommendations_similarity(query, num_recommendations)
+        
+        if not self.assessments:
+            logger.warning("No assessments loaded, cannot generate recommendations")
+            return []
+        
+        try:
+            # Prepare assessment info
+            assessment_info = []
+            for assessment in self.assessments:
+                info = {
+                    "name": assessment["name"],
+                    "remote_testing": assessment.get("remote_testing", False),
+                    "adaptive_irt": assessment.get("adaptive_irt", False),
+                    "test_type": assessment.get("test_type", [])
+                }
+                if assessment.get("duration") is not None:
+                    info["duration"] = assessment["duration"]
+                assessment_info.append(info)
+            
+            assessment_info_str = json.dumps(assessment_info, indent=2)
+            
+            # Generate prompt
+            prompt = self.PROMPT_TEMPLATE.format(
+                query=query,
+                assessment_info=assessment_info_str
+            )
+            
+            # Call Gemini API
+            response = await self.model.generate_content_async(
+                self.SYSTEM_PROMPT + "\n" + prompt, 
+                generation_config={
+                    "temperature": 0.2,
+                    "top_p": 0.8,
+                    "top_k": 40,
+                    "max_output_tokens": 2048,
+                    "response_mime_type": "application/json"
+                }
+            )
+            
+            response_text = response.text
+            logger.debug(f"Gemini response: {response_text}")
+            
+            # Parse response
+            recommendations = self.clean_gemini_response(response_text)
+            
+            # Validate and convert to RecommendationResult objects
+            results = []
+            for rec in recommendations:
+                assessment_name = rec.get("assessment_name")
+                if not assessment_name:
+                    continue
+                
+                # Find matching assessment in our list
+                matching_assessment = None
+                for assessment in self.assessments:
+                    if assessment["name"].lower() == assessment_name.lower():
+                        matching_assessment = assessment
+                        break
+                
+                if not matching_assessment:
+                    continue
+                
+                # Create RecommendationResult
+                result = RecommendationResult(
+                    assessment_name=matching_assessment["name"],
+                    assessment_url=matching_assessment["url"],
+                    relevance_score=float(rec.get("relevance_score", 0.5)),
+                    explanation=rec.get("explanation"),
+                    duration=matching_assessment.get("duration"),
+                    remote_testing=matching_assessment.get("remote_testing", False),
+                    adaptive_irt=matching_assessment.get("adaptive_irt", False),
+                    test_type=matching_assessment.get("test_type", [])
+                )
+                results.append(result)
+            
+            # Sort by relevance score
+            results.sort(key=lambda x: x.relevance_score, reverse=True)
+            
+            # Limit to requested number
+            results = results[:num_recommendations]
+            
+            # If we don't have enough results, supplement with similarity-based recommendations
+            if len(results) < num_recommendations:
+                logger.info(f"Got {len(results)} from Gemini, supplementing with similarity-based recommendations")
+                sim_recommendations = await self.get_recommendations_similarity(query, num_recommendations + len(results))
+                
+                # Filter out recommendations we already have
+                existing_names = {r.assessment_name for r in results}
+                sim_recommendations = [r for r in sim_recommendations if r.assessment_name not in existing_names]
+                
+                # Add to results
+                results.extend(sim_recommendations[:num_recommendations - len(results)])
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error getting recommendations from Gemini: {str(e)}")
+            # Fall back to similarity-based recommendations
+            return await self.get_recommendations_similarity(query, num_recommendations)
+    
+    async def get_recommendations_similarity(self, query: str, num_recommendations: int = 3) -> List[RecommendationResult]:
+        """
+        Get recommendations based on text similarity
+        
+        Args:
+            query: Query string or job description
+            num_recommendations: Number of recommendations to return
+            
+        Returns:
+            List of RecommendationResult objects
+        """
+        if not self.assessments or not self.vectorizer or self.tfidf_matrix is None:
+            logger.warning("No assessments loaded or vectorizer not initialized")
+            return []
+        
+        try:
+            # Transform query using the same vectorizer
+            query_vec = self.vectorizer.transform([query])
+            
+            # Calculate similarity scores
+            sim_scores = cosine_similarity(query_vec, self.tfidf_matrix).flatten()
+            
+            # Get indices of top matches
+            top_indices = sim_scores.argsort()[-num_recommendations*2:][::-1]
+            
+            # Create recommendation results
+            results = []
+            for i in top_indices:
+                if i < len(self.assessments):
+                    assessment = self.assessments[i]
+                    
+                    # Create recommendation result
+                    result = RecommendationResult(
+                        assessment_name=assessment["name"],
+                        assessment_url=assessment["url"],
+                        relevance_score=float(sim_scores[i]),
+                        duration=assessment.get("duration"),
+                        remote_testing=assessment.get("remote_testing", False),
+                        adaptive_irt=assessment.get("adaptive_irt", False),
+                        test_type=assessment.get("test_type", [])
+                    )
+                    results.append(result)
+            
+            # Limit to requested number and return
+            return results[:num_recommendations]
+            
+        except Exception as e:
+            logger.error(f"Error getting recommendations using similarity: {str(e)}")
+            return []
+    
+    def generate_explanation(self, assessment_name: str, query: str) -> str:
+        """
+        Generate explanation for why an assessment is recommended
+        
+        Args:
+            assessment_name: Name of the assessment
+            query: Original query
+            
+        Returns:
+            Explanation string
+        """
+        if not self.use_gemini or not self.api_key:
+            return ""
+        
+        try:
+            prompt = f"""As an expert in SHL assessments, explain in 1-2 sentences why the "{assessment_name}" 
+            assessment would be appropriate for this job or query: "{query}"."""
+            
+            response = self.model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.2,
+                    "max_output_tokens": 100
+                }
+            )
+            
+            return response.text.strip()
+        except Exception as e:
+            logger.error(f"Error generating explanation: {str(e)}")
+            return ""
+    
+    async def get_recommendations(self, query: str, num_recommendations: int = 3) -> List[RecommendationResult]:
+        """
+        Get recommendations for a query
+        
+        Args:
+            query: Query string or job description
+            num_recommendations: Number of recommendations to return
+            
+        Returns:
+            List of RecommendationResult objects
+        """
+        # Check if we have assessments
+        if not self.assessments:
+            logger.warning("No assessments loaded, cannot generate recommendations")
+            return []
+        
+        # Use Gemini if available
+        if self.use_gemini and self.api_key:
+            return await self.get_recommendations_gemini(query, num_recommendations)
+        else:
+            return await self.get_recommendations_similarity(query, num_recommendations)
+    
+    async def generate_generic_response(self, query: str) -> str:
+        """
+        Generate a generic response for queries that don't match assessments
         
         Args:
             query: User query
-            max_duration: Maximum duration in minutes (optional)
-            top_k: Number of recommendations to return
             
         Returns:
-            List of recommended assessments with scores
+            Response string
         """
-        if not self.assessments:
-            return []
+        if not self.use_gemini or not self.api_key:
+            return "I'm unable to provide specific information about that query. Try asking about specific assessment types or job roles."
         
-        logger.info(f"Generating recommendations for query: '{query}'")
-        
-        # Extract duration limit from query if not provided
-        if max_duration is None:
-            max_duration = self._extract_duration_limit(query)
-        
-        start_time = time.time()
-        
-        # Get keyword search results
-        keyword_results = self._keyword_search(query, top_k=top_k*2)
-        
-        # Get vector search results
-        vector_results = self._vector_search(query, top_k=top_k*2)
-        
-        # Combine results
-        combined_scores = {}
-        
-        # Add keyword scores (weight: 0.3)
-        for result in keyword_results:
-            idx = result["idx"]
-            if idx not in combined_scores:
-                combined_scores[idx] = 0
-            combined_scores[idx] += result["score"] * 0.3
-        
-        # Add vector scores (weight: 0.7)
-        for result in vector_results:
-            idx = result["idx"]
-            if idx not in combined_scores:
-                combined_scores[idx] = 0
-            combined_scores[idx] += result["score"] * 0.7
-        
-        # Create combined results
-        results = []
-        for idx, score in combined_scores.items():
-            assessment = self.assessments[idx]
+        try:
+            prompt = self.FALLBACK_PROMPT.format(query=query)
             
-            # Skip if duration exceeds max_duration
-            if max_duration is not None and assessment.duration is not None and assessment.duration > max_duration:
-                continue
+            response = await self.model.generate_content_async(
+                prompt,
+                generation_config={
+                    "temperature": 0.4,
+                    "max_output_tokens": 150
+                }
+            )
             
-            results.append({
-                "assessment": assessment,
-                "score": score
-            })
-        
-        # Sort by score
-        results.sort(key=lambda x: x["score"], reverse=True)
-        
-        # Get top results
-        top_results = results[:top_k*2]
-        
-        # Rerank with Gemini if available
-        if GOOGLE_API_KEY:
-            for result in top_results:
-                gemini_score = self._gemini_classify(query, result["assessment"])
-                # Weight: 0.6 original score, 0.4 Gemini score
-                result["score"] = result["score"] * 0.6 + gemini_score * 0.4
-            
-            # Resort
-            top_results.sort(key=lambda x: x["score"], reverse=True)
-        
-        # Format final results
-        final_results = []
-        for i, result in enumerate(top_results[:top_k]):
-            assessment = result["assessment"]
-            final_results.append({
-                "name": assessment.name,
-                "url": assessment.url,
-                "score": round(result["score"], 3),
-                "test_type": assessment.test_type,
-                "remote_testing": assessment.remote_testing,
-                "adaptive_irt": assessment.adaptive_irt,
-                "duration": assessment.duration
-            })
-        
-        elapsed_time = time.time() - start_time
-        logger.info(f"Recommendations generated in {elapsed_time:.2f} seconds")
-        
-        return final_results
+            return response.text.strip()
+        except Exception as e:
+            logger.error(f"Error generating generic response: {str(e)}")
+            return "I'm unable to provide specific information about that query. Try asking about specific assessment types or job roles."
 
+# Singleton instance for the application
+recommender_instance = None
 
-def create_sample_data():
-    """Create sample assessment data if the real data doesn't exist"""
-    if os.path.exists("shl_assessments.json"):
-        return
+def get_recommender(
+    assessments_path: str = "shl_assessments.json",
+    api_key: Optional[str] = None,
+    use_gemini: bool = True
+) -> SHLRecommender:
+    """
+    Get or create the recommender instance
     
-    sample_assessments = [
-        {
-            "name": "Verify Numerical Reasoning Test",
-            "url": "https://example.com/verify-numerical",
-            "remote_testing": True,
-            "adaptive_irt": False,
-            "duration": 25,
-            "test_type": ["Numerical Reasoning", "Cognitive Ability"]
-        },
-        {
-            "name": "Verify Verbal Reasoning Test",
-            "url": "https://example.com/verify-verbal",
-            "remote_testing": True,
-            "adaptive_irt": False,
-            "duration": 25,
-            "test_type": ["Verbal Reasoning", "Cognitive Ability"]
-        },
-        {
-            "name": "Verify General Ability Test",
-            "url": "https://example.com/verify-ga",
-            "remote_testing": True,
-            "adaptive_irt": False,
-            "duration": 36,
-            "test_type": ["Numerical Reasoning", "Verbal Reasoning", "Inductive Reasoning", "Cognitive Ability"]
-        },
-        {
-            "name": "Work Strengths Questionnaire",
-            "url": "https://example.com/work-strengths",
-            "remote_testing": True,
-            "adaptive_irt": True,
-            "duration": 25,
-            "test_type": ["Personality Assessment"]
-        },
-        {
-            "name": "ADEPT-15 Personality Assessment",
-            "url": "https://example.com/adept15",
-            "remote_testing": True,
-            "adaptive_irt": True,
-            "duration": 25,
-            "test_type": ["Personality Assessment"]
-        }
-    ]
+    Args:
+        assessments_path: Path to JSON file containing SHL assessments
+        api_key: Google API key for Gemini API
+        use_gemini: Whether to use Gemini API for recommendations
+        
+    Returns:
+        SHLRecommender instance
+    """
+    global recommender_instance
     
-    # Save sample data
-    with open("sample_assessments.json", "w") as f:
-        json.dump(sample_assessments, f, indent=2)
+    if recommender_instance is None:
+        try:
+            recommender_instance = SHLRecommender(
+                assessments_path=assessments_path,
+                api_key=api_key,
+                use_gemini=use_gemini
+            )
+        except Exception as e:
+            logger.error(f"Error creating recommender: {str(e)}")
+            # Create a minimal recommender without assessments
+            recommender_instance = SHLRecommender(
+                assessments_path="",
+                api_key=api_key,
+                use_gemini=use_gemini
+            )
     
-    logger.info("Created sample assessment data in sample_assessments.json")
+    return recommender_instance
 
-
-def main():
-    """Main function for testing"""
-    create_sample_data()
+async def get_recommendations(query: str, num_recommendations: int = 3) -> List[RecommendationResult]:
+    """
+    Get recommendations for a query
     
-    # Initialize recommender with sample data if real data doesn't exist
-    data_path = "shl_assessments.json" if os.path.exists("shl_assessments.json") else "sample_assessments.json"
-    recommender = SHLRecommender(data_path=data_path)
+    Args:
+        query: Query string or job description
+        num_recommendations: Number of recommendations to return
+        
+    Returns:
+        List of RecommendationResult objects
+    """
+    recommender = get_recommender()
+    return await recommender.get_recommendations(query, num_recommendations)
+
+async def main():
+    """Main function to test the recommender"""
+    import asyncio
+    from dotenv import load_dotenv
+    
+    # Load API key from .env file
+    load_dotenv()
     
     # Test queries
     test_queries = [
-        "I need a test for analytical thinking",
-        "Looking for a personality assessment for leadership roles",
-        "Numerical reasoning test that can be taken remotely",
-        "Short cognitive assessment under 30 minutes for technical roles"
+        "Software Engineer with Java experience",
+        "Marketing Manager with digital marketing background",
+        "Data Scientist with Python and machine learning skills",
+        "Customer Service Representative for a call center",
+        "Sales Executive for enterprise software products"
     ]
     
+    # Initialize recommender
+    recommender = get_recommender()
+    
+    # Get recommendations for each query
     for query in test_queries:
         print(f"\nQuery: {query}")
-        results = recommender.recommend(query, top_k=2)
-        for i, result in enumerate(results):
-            print(f"{i+1}. {result['name']} (Score: {result['score']})")
-            print(f"   Type: {', '.join(result['test_type'])}")
-            print(f"   Remote: {result['remote_testing']}, Duration: {result['duration']} min")
-
+        recommendations = await recommender.get_recommendations(query, num_recommendations=3)
+        
+        if recommendations:
+            print("Recommended assessments:")
+            for i, rec in enumerate(recommendations):
+                print(f"{i+1}. {rec.assessment_name}")
+                print(f"   Relevance: {rec.relevance_score:.2f}")
+                print(f"   Duration: {rec.duration} minutes")
+                print(f"   Remote: {rec.remote_testing}, Adaptive: {rec.adaptive_irt}")
+                if rec.explanation:
+                    print(f"   Explanation: {rec.explanation}")
+                print(f"   URL: {rec.assessment_url}")
+        else:
+            print("No recommendations found.")
 
 if __name__ == "__main__":
-    main() 
+    asyncio.run(main()) 

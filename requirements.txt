@@ -1,25 +1,41 @@
-# Scraping
-httpx==0.23.0
-selectolax==0.3.12
-# Removing playwright to avoid binary installation issues
-# playwright==1.39.0
-
-# AI
-google-generativeai==0.2.1
-
-# Web
+# Core dependencies
 fastapi==0.95.0
-streamlit==1.22.0
-uvicorn==0.22.0
-pillow==9.5.0
-
-# Utils
-pandas==1.5.3
 pydantic==1.10.8
-tqdm==4.65.0
+uvicorn==0.22.0
+streamlit==1.22.0
+httpx==0.23.0
 python-dotenv==1.0.0
+
+# Data processing
+pandas==1.5.3
 numpy==1.24.3
 scikit-learn==1.2.2
 
-# Replacing faiss-cpu with scikit-learn for vector similarity
-# faiss-cpu==1.7.4 
+# Web scraping
+selectolax==0.3.12
+playwright==1.32.1
+
+# UI enhancements
+tabulate==0.9.0
+
+# Google Gemini API
+google-generativeai==0.2.1
+
+# ASGI middleware
+starlette==0.26.1
+
+# Time-related utilities
+pytz==2023.3
+
+# Progress bar for CLI
+tqdm==4.65.0
+
+# Testing and evaluation
+pytest==7.3.1
+pytest-asyncio==0.21.0
+
+# Additional dependencies for deployment
+gunicorn==20.1.0
+python-multipart==0.0.6
+aiofiles==0.8.0
+jinja2==3.1.2 

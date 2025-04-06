@@ -1,133 +1,250 @@
-from fastapi import FastAPI, Query, HTTPException, Body
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional, Dict, Any
 import os
+import logging
 import json
-from recommender import SHLRecommender
-from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
+from datetime import datetime
 
-# Initialize the app
+from fastapi import FastAPI, HTTPException, Query, Body, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+import uvicorn
+
+from recommender import get_recommender, RecommendationResult
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Define API models
+class QueryInput(BaseModel):
+    """Query input for recommendation API"""
+    query: str = Field(..., description="Query text or job description")
+    num_recommendations: int = Field(3, description="Number of recommendations to return")
+
+class RecommendationResponse(BaseModel):
+    """Response model for recommendation API"""
+    assessment_name: str = Field(..., description="Name of the SHL assessment")
+    assessment_url: str = Field(..., description="URL to the assessment page")
+    relevance_score: float = Field(..., description="Relevance score (0-1)")
+    explanation: Optional[str] = Field(None, description="Explanation of why this assessment is recommended")
+    duration: Optional[int] = Field(None, description="Duration of the assessment in minutes")
+    remote_testing: bool = Field(False, description="Whether remote testing is supported")
+    adaptive_irt: bool = Field(False, description="Whether adaptive/IRT testing is supported")
+    test_type: List[str] = Field([], description="Types of tests included in the assessment")
+
+class ErrorResponse(BaseModel):
+    """Error response model"""
+    detail: str
+
+# Initialize FastAPI app
 app = FastAPI(
-    title="SHL Assessment Recommendation API",
-    description="Recommends SHL assessments based on natural language job descriptions",
-    version="1.0.0"
+    title="SHL Assessment Recommender API",
+    description="API for recommending SHL assessments based on job descriptions or queries",
+    version="1.0.0",
 )
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For production, specify origins
+    allow_origins=["*"],  # Allows all origins
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
 )
 
-# Initialize recommender
-data_path = "shl_assessments.json" if os.path.exists("shl_assessments.json") else "sample_assessments.json"
-if not os.path.exists(data_path):
-    from recommender import create_sample_data
-    create_sample_data()
-    data_path = "sample_assessments.json"
+# Health check endpoint
+@app.get("/health", tags=["Health"])
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
-recommender = SHLRecommender(data_path=data_path)
-
-# Define request model
-class RecommendationRequest(BaseModel):
-    query: str
-    max_duration: Optional[int] = None
-    top_k: int = 5
-
-@app.get("/")
-async def root():
-    """Root endpoint - provides a simple welcome message"""
-    return {
-        "message": "Welcome to the SHL Assessment Recommendation API",
-        "documentation": "/docs",
-        "endpoints": [
-            {
-                "path": "/recommend",
-                "description": "Get assessment recommendations",
-                "methods": ["GET", "POST"]
-            }
-        ]
-    }
-
-@app.get("/recommend")
-async def recommend(
-    query: str = Query(..., description="Natural language query about job requirements"),
-    max_duration: Optional[int] = Query(None, description="Maximum duration in minutes"),
-    top_k: int = Query(5, description="Number of recommendations to return")
+# Get recommendations with GET (query params)
+@app.get("/recommendations", 
+         response_model=List[RecommendationResponse],
+         responses={
+             200: {"description": "Successful response"},
+             422: {"model": ErrorResponse, "description": "Validation error"},
+             500: {"model": ErrorResponse, "description": "Server error"}
+         },
+         tags=["Recommendations"])
+async def get_recommendations(
+    query: str = Query(..., description="Query text or job description"),
+    num_recommendations: int = Query(3, description="Number of recommendations to return", ge=1, le=10)
 ):
     """
-    Get assessment recommendations based on a job description query
+    Get SHL assessment recommendations based on a query or job description.
     
-    Args:
-        query: Natural language query describing the job role or skills needed
-        max_duration: Maximum assessment duration in minutes (optional)
-        top_k: Number of recommendations to return (default: 5)
+    - **query**: The query text or job description to match against assessments
+    - **num_recommendations**: Number of recommendations to return (default: 3)
     
-    Returns:
-        List of recommended assessments with relevance scores
+    Returns a list of recommended assessments with relevance scores and metadata.
     """
     try:
-        results = recommender.recommend(query=query, max_duration=max_duration, top_k=top_k)
-        return {"recommendations": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating recommendations: {str(e)}")
-
-@app.post("/recommend")
-async def recommend_post(request: RecommendationRequest):
-    """
-    Get assessment recommendations based on a job description query (POST method)
-    
-    Request body:
-        query: Natural language query describing the job role or skills needed
-        max_duration: Maximum assessment duration in minutes (optional)
-        top_k: Number of recommendations to return (default: 5)
-    
-    Returns:
-        List of recommended assessments with relevance scores
-    """
-    try:
-        results = recommender.recommend(
-            query=request.query,
-            max_duration=request.max_duration,
-            top_k=request.top_k
-        )
-        return {"recommendations": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating recommendations: {str(e)}")
-
-@app.get("/model-info")
-async def model_info():
-    """Get information about the underlying model and data"""
-    return {
-        "model_type": "TF-IDF + Keyword Matching + Gemini Reranking",
-        "embeddings_model": "scikit-learn TfidfVectorizer",
-        "assessments_count": len(recommender.assessments),
-        "has_gemini_integration": bool(os.getenv("GOOGLE_API_KEY")),
-        "data_source": data_path
-    }
-
-@app.get("/assessments")
-async def get_assessments():
-    """Get all available assessments"""
-    try:
-        assessments = [
-            {
-                "name": a.name,
-                "url": a.url,
-                "test_type": a.test_type,
-                "remote_testing": a.remote_testing,
-                "adaptive_irt": a.adaptive_irt,
-                "duration": a.duration
-            }
-            for a in recommender.assessments
+        # Get recommender instance
+        recommender = get_recommender()
+        
+        # Get recommendations
+        recommendations = await recommender.get_recommendations(query, num_recommendations)
+        
+        # Check if we got recommendations
+        if not recommendations:
+            # Try to generate a generic response
+            generic_response = await recommender.generate_generic_response(query)
+            
+            # If we got a generic response, return it as an error
+            if generic_response:
+                raise HTTPException(status_code=404, detail={
+                    "message": "No matching assessments found",
+                    "response": generic_response
+                })
+            else:
+                raise HTTPException(status_code=404, detail="No matching assessments found")
+        
+        # Convert to response model
+        response = [
+            RecommendationResponse(
+                assessment_name=rec.assessment_name,
+                assessment_url=rec.assessment_url,
+                relevance_score=rec.relevance_score,
+                explanation=rec.explanation,
+                duration=rec.duration,
+                remote_testing=rec.remote_testing,
+                adaptive_irt=rec.adaptive_irt,
+                test_type=rec.test_type
+            )
+            for rec in recommendations
         ]
-        return {"assessments": assessments}
+        
+        return response
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving assessments: {str(e)}")
+        logger.error(f"Error getting recommendations: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+# Get recommendations with POST (JSON body)
+@app.post("/recommendations", 
+          response_model=List[RecommendationResponse],
+          responses={
+              200: {"description": "Successful response"},
+              422: {"model": ErrorResponse, "description": "Validation error"},
+              500: {"model": ErrorResponse, "description": "Server error"}
+          },
+          tags=["Recommendations"])
+async def post_recommendations(input_data: QueryInput):
+    """
+    Get SHL assessment recommendations based on a query or job description (POST method).
+    
+    - **input_data**: JSON object with query and optional parameters
+    
+    Returns a list of recommended assessments with relevance scores and metadata.
+    """
+    try:
+        # Get recommender instance
+        recommender = get_recommender()
+        
+        # Get recommendations
+        recommendations = await recommender.get_recommendations(
+            input_data.query, 
+            input_data.num_recommendations
+        )
+        
+        # Check if we got recommendations
+        if not recommendations:
+            # Try to generate a generic response
+            generic_response = await recommender.generate_generic_response(input_data.query)
+            
+            # If we got a generic response, return it as an error
+            if generic_response:
+                raise HTTPException(status_code=404, detail={
+                    "message": "No matching assessments found",
+                    "response": generic_response
+                })
+            else:
+                raise HTTPException(status_code=404, detail="No matching assessments found")
+        
+        # Convert to response model
+        response = [
+            RecommendationResponse(
+                assessment_name=rec.assessment_name,
+                assessment_url=rec.assessment_url,
+                relevance_score=rec.relevance_score,
+                explanation=rec.explanation,
+                duration=rec.duration,
+                remote_testing=rec.remote_testing,
+                adaptive_irt=rec.adaptive_irt,
+                test_type=rec.test_type
+            )
+            for rec in recommendations
+        ]
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error getting recommendations: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+# Get all assessments
+@app.get("/assessments", 
+         response_model=List[Dict[str, Any]],
+         responses={
+             200: {"description": "Successful response"},
+             500: {"model": ErrorResponse, "description": "Server error"}
+         },
+         tags=["Assessments"])
+async def get_all_assessments():
+    """
+    Get all available SHL assessments.
+    
+    Returns a list of all assessments in the system.
+    """
+    try:
+        # Get recommender instance
+        recommender = get_recommender()
+        
+        # Return all assessments
+        return recommender.assessments
+        
+    except Exception as e:
+        logger.error(f"Error getting assessments: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+# On startup event - load assessments and initialize recommender
+@app.on_event("startup")
+async def startup_event():
+    """Initialize on startup"""
+    try:
+        # Check if assessments file exists
+        if not os.path.exists("shl_assessments.json"):
+            logger.warning("No assessments file found, will create sample data")
+            # Attempt to import scraper
+            try:
+                from scraper import scrape_all_shl_assessments
+                logger.info("Running scraper to get assessment data")
+                assessments, _ = await scrape_all_shl_assessments()
+                logger.info(f"Scraped {len(assessments)} assessments")
+            except ImportError:
+                logger.error("Scraper module not found, creating empty assessments file")
+                with open("shl_assessments.json", "w") as f:
+                    json.dump([], f)
+        
+        # Initialize recommender
+        recommender = get_recommender()
+        logger.info(f"Recommender initialized with {len(recommender.assessments)} assessments")
+        
+    except Exception as e:
+        logger.error(f"Error during startup: {str(e)}")
+
+def run_api():
+    """Run the API server"""
+    # Get port from environment or use default
+    port = int(os.environ.get("PORT", 8000))
+    
+    # Run with uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    run_api() 

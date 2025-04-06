@@ -1,34 +1,41 @@
-# SHL Assessment Recommendation System
+# SHL Assessment Recommender
 
-An intelligent recommendation system that helps hiring managers find the right SHL assessments for their roles. Given a natural language query or job description, the system recommends the most relevant SHL assessments.
+An intelligent recommendation system that assists hiring managers in finding relevant SHL assessments based on natural language queries or job descriptions.
 
 ## Features
 
-- 🔍 **Semantic Search**: Uses a hybrid approach combining vector similarity (70%) and keyword matching (30%)
-- 🤖 **Gemini AI Integration**: Leverages Google's Gemini API for embeddings and semantic understanding
-- 🌐 **Rich Web Interface**: User-friendly Streamlit app with filtering options and detailed results
-- 🔄 **RESTful API**: Comprehensive API endpoints for integration with other systems
-- 📊 **Evaluation Metrics**: Built-in evaluation harness with Mean Recall@3 and MAP@3 metrics
-- 🔄 **Robust Scraper**: Asynchronous scraper with error recovery and pagination handling
+- **Semantic Search**: Find assessments that match your needs using natural language processing
+- **Gemini AI Integration**: Powered by Google's Gemini AI for context-aware recommendations
+- **Rich Web Interface**: User-friendly Streamlit UI for exploring recommendations
+- **RESTful API**: Programmatic access to recommendations via FastAPI
+- **Evaluation Metrics**: Built-in evaluation of recommendation quality (MAP@K, Recall@K)
+- **Robust Scraper**: Up-to-date assessment data from SHL's product catalog
 
 ## System Architecture
 
 The system consists of three main components:
 
 1. **Scraper**: Extracts assessment data from SHL's product catalog
-2. **Recommendation Engine**: Uses a hybrid approach to find relevant assessments
-3. **Web Interface**: Provides a user-friendly interface for searching and viewing recommendations
+2. **Recommendation Engine**: Matches job descriptions to assessments using semantic search and Gemini AI
+3. **Web Interface**: Streamlit app for interacting with the recommendations
 
 ## Installation
 
-1. Clone the repository:
-   ```
+### Prerequisites
+
+- Python 3.9 or higher
+- pip (Python package manager)
+
+### Setup
+
+1. Clone this repository:
+   ```bash
    git clone https://github.com/yourusername/shl-recommender.git
    cd shl-recommender
    ```
 
-2. Create a virtual environment and activate it:
-   ```
+2. Create a virtual environment:
+   ```bash
    python -m venv venv
    
    # On Windows
@@ -39,125 +46,96 @@ The system consists of three main components:
    ```
 
 3. Install dependencies:
-   ```
+   ```bash
    pip install -r requirements.txt
    ```
 
-4. (Optional) Set up Gemini API:
-   Create a `.env` file with your Google API key:
+4. Install Playwright browsers (for scraping):
+   ```bash
+   playwright install
    ```
-   GOOGLE_API_KEY=your_api_key_here
-   ```
-   You can get an API key from [Google AI Studio](https://ai.google.dev/).
+
+5. Set up Google Gemini API key:
+   - Get an API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
+   - Create a `.env` file in the project root with the following content:
+     ```
+     GOOGLE_API_KEY=your_api_key_here
+     API_URL=http://localhost:8000
+     ```
 
 ## Usage
 
-### Running the Application
+### Running the System
 
-The easiest way to run the application is using the `run.py` script:
+You can run various components independently or all together:
 
 ```bash
-# Run both API and web app, creating sample data if needed
-python run.py
+# Run the scraper to get the latest assessment data
+python main.py --scrape
 
-# Run the scraper first to get real SHL assessment data
-python run.py --scrape
+# Run the API server only
+python main.py --api
 
-# Run only the API server
-python run.py --api-only
+# Run the web app only
+python main.py --app
 
-# Run only the Streamlit web app
-python run.py --app-only
+# Run both API and web app
+python main.py --all
+
+# Run evaluation to measure recommendation quality
+python main.py --evaluate
+
+# Run a test query
+python main.py --query "Software Engineer with Java experience"
 ```
 
-Once running, you can access:
-- Web UI: http://localhost:8501
-- API: http://localhost:8000/recommend?query=your+query+here
-- API Documentation: http://localhost:8000/docs
+### Accessing the Application
 
-### Using the Web Interface
+- Web UI: Open `http://localhost:8501` in your browser
+- API documentation: Open `http://localhost:8000/docs` in your browser
 
-1. Enter a natural language query or job description
-2. Optionally set a maximum duration and number of results
-3. View recommended assessments in a sortable table
-4. Click on assessment links to view detailed information on SHL's website
+### API Usage
 
-### Using the API
+#### GET Request
 
-#### GET /recommend
-
-```
-GET /recommend?query=Java developers with collaboration skills&max_duration=40&top_k=5
+```bash
+curl -X 'GET' \
+  'http://localhost:8000/recommendations?query=Software%20Engineer%20with%20Java%20experience&num_recommendations=3' \
+  -H 'accept: application/json'
 ```
 
-Parameters:
-- `query` (required): Natural language query or job description
-- `max_duration` (optional): Maximum assessment duration in minutes
-- `top_k` (optional): Number of recommendations to return (default: 10)
+#### POST Request
 
-#### POST /recommend
-
-```
-POST /recommend
-Content-Type: application/json
-
-{
-  "query": "Java developers with collaboration skills",
-  "max_duration": 40,
-  "top_k": 5
-}
+```bash
+curl -X 'POST' \
+  'http://localhost:8000/recommendations' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "query": "Software Engineer with Java experience",
+  "num_recommendations": 3
+}'
 ```
 
 ## Components
 
-### Scraper (`scraper.py`)
+The system consists of several key files:
 
-The scraper is designed to extract assessment data from SHL's product catalog with:
-- Asynchronous HTTP requests for efficiency
-- Auto pagination detection
-- Error retries (3 attempts)
-- JavaScript rendering fallback via Playwright if needed
-- Structured data extraction and validation
-
-### Recommender (`recommender.py`)
-
-The recommendation engine uses a hybrid approach:
-- Vector similarity search (70% weight) using Sentence Transformers
-- Keyword matching (30% weight) for exact term matches
-- Automatic parameter extraction from natural language queries
-- Duration and test type filtering
-
-### Evaluation (`evaluation.py`)
-
-The evaluation module calculates:
-- Mean Recall@K: Measures how many relevant assessments were retrieved
-- MAP@K: Evaluates both relevance and ranking order
-- Detailed per-query metrics for analysis
-
-### API (`api.py`)
-
-The FastAPI backend provides:
-- RESTful API endpoints for recommendations
-- Swagger documentation
-- Structured request/response validation
-
-### Web App (`app.py`)
-
-The Streamlit web app includes:
-- Query input via text or URL extraction
-- Filtering options for duration and result count
-- Sortable table of recommendations with direct links
-- Detailed cards for each assessment
-- Example queries for quick testing
+- `scraper.py`: Web scraper for SHL's assessment catalog
+- `recommender.py`: The core recommendation engine
+- `evaluation.py`: Metrics and benchmarking for recommendations
+- `api.py`: FastAPI implementation for the backend
+- `app.py`: Streamlit web interface
+- `main.py`: CLI entry point to run various components
 
 ## Example Queries
 
-- "I am hiring for Java developers who can also collaborate effectively with my business teams. Looking for an assessment that can be completed in 40 minutes."
-- "Looking to hire mid-level professionals who are proficient in Python, SQL and JavaScript. Need an assessment package that can test all skills with max duration of 60 minutes."
-- "I am hiring for an analyst and want applications to be screened using Cognitive and personality tests, what options are available within 45 mins."
-- "Need to assess leadership potential for a management position in less than 30 minutes."
-- "Looking for a sales assessment that evaluates both knowledge and personality traits."
+- "Software Engineer with Java and Spring experience"
+- "Marketing Manager with digital marketing background"
+- "Data Scientist with machine learning expertise"
+- "Customer Service Representative for a call center"
+- "Project Manager for software development team"
 
 ## License
 
-MIT 
+This project is licensed under the MIT License - see the LICENSE file for details. 
