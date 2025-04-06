@@ -62,6 +62,56 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
+# Get recommendations with GET (query params) - used by the Streamlit app
+@app.get("/recommend", 
+         response_model=List[RecommendationResponse],
+         responses={
+             200: {"description": "Successful response"},
+             422: {"model": ErrorResponse, "description": "Validation error"},
+             500: {"model": ErrorResponse, "description": "Server error"}
+         },
+         tags=["Recommendations"])
+async def get_recommendations_simple(
+    query: str = Query(..., description="Query text or job description"),
+    top_k: int = Query(10, description="Number of recommendations to return", ge=1, le=20)
+):
+    """
+    Get SHL assessment recommendations based on a query or job description.
+    Used by the Streamlit app.
+    
+    - **query**: The query text or job description to match against assessments
+    - **top_k**: Number of recommendations to return (default: 10)
+    
+    Returns a list of recommended assessments with relevance scores and metadata.
+    """
+    try:
+        # Get recommender instance
+        recommender = get_recommender()
+        
+        # Get recommendations
+        recommendations = await recommender.get_recommendations(query, top_k)
+        
+        # Convert to response model
+        response = [
+            RecommendationResponse(
+                assessment_name=rec.assessment_name,
+                assessment_url=rec.assessment_url,
+                relevance_score=rec.relevance_score,
+                explanation=rec.explanation,
+                duration=rec.duration,
+                remote_testing=rec.remote_testing,
+                adaptive_irt=rec.adaptive_irt,
+                test_type=rec.test_type
+            )
+            for rec in recommendations
+        ]
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error getting recommendations: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
 # Get recommendations with GET (query params)
 @app.get("/recommendations", 
          response_model=List[RecommendationResponse],

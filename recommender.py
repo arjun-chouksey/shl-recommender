@@ -138,13 +138,25 @@ Your response should be helpful but brief (maximum 3 sentences).
         if self.use_gemini and self.api_key:
             try:
                 genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel('gemini-pro')
+                
+                # Check which version of the generative AI library we're using
+                if hasattr(genai, 'GenerativeModel'):
+                    # For version 0.3.x and above
+                    self.model = genai.GenerativeModel('gemini-pro')
+                    self.use_new_api = True
+                else:
+                    # For version 0.2.x and below
+                    self.model = None
+                    self.use_new_api = False
+                
                 logger.info("Gemini API initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize Gemini API: {str(e)}")
                 self.use_gemini = False
+                self.use_new_api = False
         else:
             self.use_gemini = False
+            self.use_new_api = False
             if use_gemini:
                 logger.warning("No API key provided, will use fallback recommendation method")
         
@@ -276,18 +288,32 @@ Your response should be helpful but brief (maximum 3 sentences).
             )
             
             # Call Gemini API
-            response = await self.model.generate_content_async(
-                self.SYSTEM_PROMPT + "\n" + prompt, 
-                generation_config={
-                    "temperature": 0.2,
-                    "top_p": 0.8,
-                    "top_k": 40,
-                    "max_output_tokens": 2048,
-                    "response_mime_type": "application/json"
-                }
-            )
+            response = None
+            if self.use_new_api:
+                # For version 0.3.x and above
+                response = await self.model.generate_content_async(
+                    self.SYSTEM_PROMPT + "\n" + prompt, 
+                    generation_config={
+                        "temperature": 0.2,
+                        "top_p": 0.8,
+                        "top_k": 40,
+                        "max_output_tokens": 2048,
+                        "response_mime_type": "application/json"
+                    }
+                )
+                response_text = response.text
+            else:
+                # For version 0.2.x and below
+                completion = await genai.generate_text_async(
+                    model="gemini-pro",
+                    prompt=self.SYSTEM_PROMPT + "\n" + prompt,
+                    temperature=0.2,
+                    top_p=0.8,
+                    top_k=40,
+                    max_output_tokens=2048
+                )
+                response_text = completion.result
             
-            response_text = response.text
             logger.debug(f"Gemini response: {response_text}")
             
             # Parse response
@@ -416,15 +442,26 @@ Your response should be helpful but brief (maximum 3 sentences).
             prompt = f"""As an expert in SHL assessments, explain in 1-2 sentences why the "{assessment_name}" 
             assessment would be appropriate for this job or query: "{query}"."""
             
-            response = self.model.generate_content(
-                prompt,
-                generation_config={
-                    "temperature": 0.2,
-                    "max_output_tokens": 100
-                }
-            )
-            
-            return response.text.strip()
+            if self.use_new_api:
+                # For version 0.3.x and above
+                response = self.model.generate_content(
+                    prompt,
+                    generation_config={
+                        "temperature": 0.2,
+                        "max_output_tokens": 100
+                    }
+                )
+                return response.text.strip()
+            else:
+                # For version 0.2.x and below
+                completion = genai.generate_text(
+                    model="gemini-pro",
+                    prompt=prompt,
+                    temperature=0.2,
+                    max_output_tokens=100
+                )
+                return completion.result.strip()
+                
         except Exception as e:
             logger.error(f"Error generating explanation: {str(e)}")
             return ""
@@ -467,18 +504,29 @@ Your response should be helpful but brief (maximum 3 sentences).
         try:
             prompt = self.FALLBACK_PROMPT.format(query=query)
             
-            response = await self.model.generate_content_async(
-                prompt,
-                generation_config={
-                    "temperature": 0.4,
-                    "max_output_tokens": 150
-                }
-            )
+            if self.use_new_api:
+                # For version 0.3.x and above
+                response = await self.model.generate_content_async(
+                    prompt,
+                    generation_config={
+                        "temperature": 0.4,
+                        "max_output_tokens": 150
+                    }
+                )
+                return response.text.strip()
+            else:
+                # For version 0.2.x and below
+                completion = await genai.generate_text_async(
+                    model="gemini-pro",
+                    prompt=prompt,
+                    temperature=0.4,
+                    max_output_tokens=150
+                )
+                return completion.result.strip()
             
-            return response.text.strip()
         except Exception as e:
             logger.error(f"Error generating generic response: {str(e)}")
-            return "I'm unable to provide specific information about that query. Try asking about specific assessment types or job roles."
+            return "I'm unable to provide information about that query at this time."
 
 # Singleton instance for the application
 recommender_instance = None
